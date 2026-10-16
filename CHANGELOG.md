@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- MasakiMu319 safety fork (`0.16.1-masaki.1`): anchored edits fail closed on hash-only mismatches, self-inconsistent `LINE:HASH|content` pairs, and ambiguous duplicate content in `applyHashlineEdits`. Window relocation requires a complete `LINE:HASH|content` anchor whose exact content occurs once nearby.
+
 ## [0.16.1] - 2026-10-14
 
 ### Fixed

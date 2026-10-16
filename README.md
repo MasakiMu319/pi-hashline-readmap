@@ -10,6 +10,10 @@ Upgrade Pi's local coding workflow with hash-anchored reads and edits, structura
 
 Bundled `nu` is deprecated but retained. It stays available for at least one published deprecation release; removal requires a separately announced breaking release after migration-example verification and the removal checklist pass. See [Nu deprecation and migration](docs/nu-deprecation.md).
 
+## MasakiMu319 safety fork
+
+This fork changes anchored-edit window recovery to fail closed. A bare `LINE:HASH` never relocates by nearby hash in `applyHashlineEdits` when its hinted line mismatches (session-tracked shifts from earlier edits still remap via `ServedLines`). Window relocation requires a self-consistent `LINE:HASH|complete content` anchor and exactly one nearby line with byte-for-byte matching content. This policy is based on a real SailAgent session where an invalid hash-only anchor was auto-relocated into the wrong CSS rule.
+
 ## Install
 
 ```bash

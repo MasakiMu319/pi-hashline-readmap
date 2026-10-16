@@ -19,7 +19,7 @@ describe("issue 230 — insert_after batch semantics", () => {
       lineEnding: "\n" as const,
     },
     {
-      name: "auto-relocated anchor",
+      name: "exact-content-relocated anchor",
       content: ["prefix", "target", "tail"].join("\n"),
       anchorLine: 1,
       anchorText: "target",
@@ -74,7 +74,7 @@ describe("issue 230 — insert_after batch semantics", () => {
     "preserves request order for distinct insertions sharing one anchor: $name",
     ({ content, anchorLine, anchorText, first, second, expected, lineEnding }) => {
       const normalized = normalizeToLF(content);
-      const anchor = `${anchorLine}:${computeLineHash(anchorLine, anchorText)}`;
+      const anchor = `${anchorLine}:${computeLineHash(anchorLine, anchorText)}|${anchorText}`;
       const result = applyHashlineEdits(normalized, [
         { insert_after: { anchor, new_text: first } },
         { insert_after: { anchor, new_text: second } },

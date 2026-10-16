@@ -116,4 +116,69 @@ describe("no content-similarity recovery for stale anchors", () => {
       ])
     ).toThrow(/changed since last read/);
   });
+
+  it("relocates a unique complete anchor when the line moves", () => {
+    const originalLine = "const result = processData(input, options, config)";
+    const content = ["line 1", "inserted line", originalLine, "line 4"].join("\n");
+    const hash = computeLineHash(2, originalLine);
+
+    const result = applyHashlineEdits(content, [
+      { set_line: { anchor: `2:${hash}|${originalLine}`, new_text: "edited line" } },
+    ]);
+
+    expect(result.content).toContain("edited line");
+    expect(result.warnings).toContain(
+      `Exact-content-relocated anchor 2:${hash} -> 3:${hash} (window ±20).`,
+    );
+  });
+
+  it("rejects ambiguous duplicate exact content", () => {
+    const originalLine = "const target = value;";
+    const hash = computeLineHash(2, originalLine);
+    const content = ["line 1", "changed", originalLine, "line 4", originalLine].join("\n");
+
+    expect(() =>
+      applyHashlineEdits(content, [
+        { set_line: { anchor: `2:${hash}|${originalLine}`, new_text: "edited" } },
+      ]),
+    ).toThrow(/changed since last read/);
+  });
+
+  it("rejects a self-inconsistent hash and content pair", () => {
+    const content = ["line 1", "line 2", "target"].join("\n");
+    const wrongHash = computeLineHash(1, "different target");
+
+    expect(() =>
+      applyHashlineEdits(content, [
+        { set_line: { anchor: `1:${wrongHash}|target`, new_text: "edited" } },
+      ]),
+    ).toThrow(/changed since last read/);
+  });
+
+  it("requires content identity for a moved hash-only anchor", () => {
+    const originalLine = "line B";
+    const hash = computeLineHash(2, originalLine);
+    const content = ["line A", "inserted", originalLine, "line C"].join("\n");
+
+    expect(() =>
+      applyHashlineEdits(content, [
+        { set_line: { anchor: `2:${hash}`, new_text: "edited" } },
+      ]),
+    ).toThrow(/changed since last read/);
+  });
+
+  it("relocates a complete anchor whose hinted line is beyond the shortened file", () => {
+    const originalLine = "final target";
+    const hash = computeLineHash(5, originalLine);
+    const content = ["line 1", "line 2", originalLine].join("\n");
+
+    const result = applyHashlineEdits(content, [
+      { set_line: { anchor: `5:${hash}|${originalLine}`, new_text: "edited" } },
+    ]);
+
+    expect(result.content).toBe(["line 1", "line 2", "edited"].join("\n"));
+    expect(result.warnings).toContain(
+      `Exact-content-relocated anchor 5:${hash} -> 3:${hash} (window ±20).`,
+    );
+  });
 });

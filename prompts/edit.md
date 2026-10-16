@@ -85,7 +85,7 @@ If anchors no longer match, `edit` fails with a hash mismatch (`hash-mismatch`) 
 
 Copy the updated `LINE:HASH` and retry; the rows shown in a refusal count as seen, so no re-read is needed. If the target moved farther away, re-run `read`, `grep`, `ast_search`, or `write` for fresh anchors.
 
-Anchor hashes include whitespace: a reindented line is a changed line. An unchanged line that only moved is auto-relocated with a warning; a changed line is never matched to a "similar" line.
+Anchor hashes include whitespace: a reindented line is a changed line. In `applyHashlineEdits`, a bare `LINE:HASH` validates only its hinted line; window relocation requires `LINE:HASH|complete content` with a unique exact nearby match (`Exact-content-relocated`), and a changed line is never matched to a "similar" line.
 
 `edit` also refuses to overwrite any line it would replace or delete, including lines inside a `replace_lines` range or matched by `replace`, that changed on disk since you were last shown it. The refusal shows the current rows (`>>>` marks changed ones) with fresh anchors.
 

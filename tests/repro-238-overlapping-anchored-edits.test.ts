@@ -34,7 +34,7 @@ describe("issue 238 — overlapping anchored edits", () => {
     );
 
     const content = ["A", "B", "C", "D", "E"].join("\n");
-    const anchor = (line: number, text: string) => `${line}:${computeLineHash(line, text)}`;
+    const anchor = (line: number, text: string) => `${line}:${computeLineHash(line, text)}|${text}`;
     const overlapping: HashlineEditItem[][] = [
       [
         { replace_lines: { start_anchor: anchor(1, "A"), end_anchor: anchor(3, "C"), new_text: "LEFT" } },
@@ -59,7 +59,7 @@ describe("issue 238 — overlapping anchored edits", () => {
 
     const relocatedIntoRange: HashlineEditItem[] = [
       { replace_lines: { start_anchor: anchor(2, "B"), end_anchor: anchor(4, "D"), new_text: "RANGE" } },
-      { set_line: { anchor: `1:${computeLineHash(3, "C")}`, new_text: "RELOCATED" } },
+      { set_line: { anchor: `1:${computeLineHash(3, "C")}|C`, new_text: "RELOCATED" } },
     ];
     expect(() => applyHashlineEdits(content, relocatedIntoRange)).toThrow(
       "Overlapping anchored edits are not allowed: edits[0] targets lines 2-4 and edits[1] targets line 3.",

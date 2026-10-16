@@ -26,7 +26,7 @@ describe("adaptive relocation window", () => {
 
     expect(() =>
       applyHashlineEdits(movedContent, [
-        { set_line: { anchor: `30:${hash30}`, new_text: "edited" } },
+        { set_line: { anchor: `30:${hash30}|${lines[29]}`, new_text: "edited" } },
       ])
     ).toThrow(/changed since last read/);
   });
@@ -49,7 +49,7 @@ describe("adaptive relocation window", () => {
 
     // With 5 edits: window = max(20, 5*5) = 25, which should reach line 75
     const result = applyHashlineEdits(movedContent, [
-      { set_line: { anchor: `50:${hash50}`, new_text: "edited line 50" } },
+      { set_line: { anchor: `50:${hash50}|${lines[49]}`, new_text: "edited line 50" } },
       { set_line: { anchor: `1:${computeLineHash(1, lines[0])}`, new_text: lines[0] } }, // noop
       { set_line: { anchor: `2:${computeLineHash(2, lines[1])}`, new_text: lines[1] } }, // noop
       { set_line: { anchor: `3:${computeLineHash(3, lines[2])}`, new_text: lines[2] } }, // noop
@@ -60,7 +60,7 @@ describe("adaptive relocation window", () => {
     expect(result.content).toContain("edited line 50");
     // Should have a relocation warning
     expect(result.warnings).toBeDefined();
-    expect(result.warnings!.some(w => w.includes("Auto-relocated"))).toBe(true);
+    expect(result.warnings!.some(w => w.includes("Exact-content-relocated"))).toBe(true);
   });
 
   it("adaptive window is capped at 100", () => {
@@ -81,7 +81,7 @@ describe("adaptive relocation window", () => {
 
     // Even with 25 edits (window = max(20, 25*5) = min(125, 100) = 100), 110 lines is beyond cap
     const edits: any[] = [
-      { set_line: { anchor: `100:${hash100}`, new_text: "edited" } },
+      { set_line: { anchor: `100:${hash100}|${lines[99]}`, new_text: "edited" } },
     ];
     for (let i = 0; i < 24; i++) {
       const ln = i + 1;

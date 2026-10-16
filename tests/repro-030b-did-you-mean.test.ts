@@ -38,7 +38,7 @@ describe("Feature #030b: Did you mean? suggestions on anchor mismatch", () => {
     }
   });
 
-  it("does NOT show 'Did you mean?' when auto-relocation succeeds", () => {
+  it("does NOT show 'Did you mean?' when exact-content relocation succeeds", () => {
     const content = [
       "line A",
       "inserted line",
@@ -48,9 +48,9 @@ describe("Feature #030b: Did you mean? suggestions on anchor mismatch", () => {
 
     const hashB = computeLineHash(2, "line B");
 
-    // Should auto-relocate from line 2 to line 3 — no error
+    // Complete content identifies the moved line exactly — no error
     const result = applyHashlineEdits(content, [
-      { set_line: { anchor: `2:${hashB}`, new_text: "line B modified" } }
+      { set_line: { anchor: `2:${hashB}|line B`, new_text: "line B modified" } }
     ]);
 
     expect(result.content).toContain("line B modified");

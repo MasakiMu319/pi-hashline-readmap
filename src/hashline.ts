@@ -260,7 +260,7 @@ function formatMismatchError(
 	const sorted = [...displayLines].sort((a, b) => a - b);
 	const out: string[] = [
 		"Edit rejected — nothing was written. The anchor hash did not match the current file content.",
-		`${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since last read. Auto-relocation checks only within ±${relocationWindow} lines of each anchor. Use the updated LINE:HASH references shown below (>>> marks changed lines).`,
+		`${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since last read. Hash-only mismatches never relocate; complete LINE:HASH|content anchors use unique exact-content relocation within ±${relocationWindow} lines. Use the updated anchors shown below (>>> marks changed lines).`,
 		"",
 	];
 	let prev = -1;
@@ -605,14 +605,12 @@ function createAnchorResolver(fileLines: string[], relocationWindow: number, sig
 	const notes = new Set<string>();
 	const mismatches: HashMismatch[] = [];
 
-	function findRelocationLine(expectedHash: string, hintLine: number): number | undefined {
-		const candidates = hashToLines.get(expectedHash);
-		if (!candidates?.length) return undefined;
+	function findExactContentRelocationLine(expectedContent: string, hintLine: number): number | undefined {
 		const minLine = Math.max(1, hintLine - relocationWindow);
 		const maxLine = Math.min(fileLines.length, hintLine + relocationWindow);
 		let match: number | undefined;
-		for (const candidate of candidates) {
-			if (candidate < minLine || candidate > maxLine) continue;
+		for (let candidate = minLine; candidate <= maxLine; candidate++) {
+			if (fileLines[candidate - 1] !== expectedContent) continue;
 			if (match !== undefined) return undefined; // ambiguous within window
 			match = candidate;
 		}
@@ -650,15 +648,26 @@ function createAnchorResolver(fileLines: string[], relocationWindow: number, sig
 		}
 		const expected = ref.hash.toLowerCase();
 		const originalLine = ref.line;
-		const actual = originalLine <= fileLines.length ? lineHashes[originalLine - 1] : undefined;
-		if (actual === expected) return true;
-		const relocated = findRelocationLine(expected, Math.min(originalLine, fileLines.length));
-		if (relocated !== undefined) {
-			ref.line = relocated;
-			notes.add(`Auto-relocated anchor ${originalLine}:${ref.hash} -> ${relocated}:${ref.hash} (window ±${relocationWindow}).`);
-			return true;
+		const hintedLineExists = originalLine <= fileLines.length;
+		const actual = hintedLineExists ? lineHashes[originalLine - 1] : undefined;
+		const hasContentIdentity = ref.content !== undefined;
+		const hintedContentMatches = hintedLineExists && (!hasContentIdentity || fileLines[originalLine - 1] === ref.content);
+		if (actual === expected && hintedContentMatches) return true;
+
+		// A hash-only mismatch cannot prove which nearby line was previously read.
+		// Relocate only when the complete anchor is self-consistent and its exact
+		// content identifies one nearby line. Similar content is not identity.
+		if (hasContentIdentity && computeLineHash(originalLine, ref.content!) === expected) {
+			const relocated = findExactContentRelocationLine(ref.content!, originalLine);
+			if (relocated !== undefined && relocated !== originalLine) {
+				ref.line = relocated;
+				ref.hash = lineHashes[relocated - 1];
+				notes.add(`Exact-content-relocated anchor ${originalLine}:${expected} -> ${relocated}:${ref.hash} (window ±${relocationWindow}).`);
+				return true;
+			}
 		}
-		if (originalLine > fileLines.length) {
+
+		if (!hintedLineExists) {
 			throw new Error(`Line ${originalLine} does not exist (file has ${terminatorLine ? fileLines.length - 1 : fileLines.length} lines). Re-read the file for current anchors.`);
 		}
 		// No content-similarity fallback: a line whose hash changed is stale, and editing a
