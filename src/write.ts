@@ -137,7 +137,7 @@ function generateWriteDiff(previousContent: string, nextContent: string): { diff
 }
 
 export interface WriteToolOptions {
-  onFileAnchored?: (absolutePath: string) => void;
+  onFileAnchored?: (absolutePath: string, mark?: { own: boolean }) => void;
 }
 
 type MappedFsError = {
@@ -358,10 +358,13 @@ export function registerWriteTool(pi: ExtensionAPI, options: WriteToolOptions = 
   const tool = {
     name: "write",
     label: "write",
+    // As edit: a batch containing a write runs in call order.
+    executionMode: "sequential" as const,
     description: WRITE_PROMPT_METADATA.description,
     promptSnippet: WRITE_PROMPT_METADATA.promptSnippet,
     promptGuidelines: WRITE_PROMPT_METADATA.promptGuidelines,
     parameters: WRITE_PARAMETERS,
+    constrainedSampling: { type: "json_schema", strict: "prefer" } as const,
     async execute(_toolCallId: string, params: { path: string; content: string; map?: boolean }, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any): Promise<any> {
       const normalized = normalizeToolParameters(WRITE_PARAMETERS, params);
       if (normalized.requiredNull) {
@@ -435,7 +438,7 @@ export function registerWriteTool(pi: ExtensionAPI, options: WriteToolOptions = 
         }
 
         if (result.ptcValue.lines.length > 0) {
-          options.onFileAnchored?.(absolutePath);
+          options.onFileAnchored?.(absolutePath, { own: true });
         }
 
         const bareCrWarning = result.ptcValue.warnings.find((w) => w.code === "bare-cr");

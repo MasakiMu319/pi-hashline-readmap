@@ -1,23 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import init from "../index.js";
+import { executor, version } from "./helpers/codemode-recipes.js";
 
 /**
- * Runs real codemode scripts from the selected Pi host (>= 0.99) against Hashline tools.
- * The locked 0.84.2 development host has no codemode, so this is skipped there; the
- * current-host CI lane sets PI_COMPAT_HOST and exercises it.
+ * Runs real codemode scripts from the selected Pi host against Hashline tools: the locked host,
+ * or the install PI_COMPAT_HOST selects.
  */
-const lockedHost = resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..");
-const host = process.env.PI_COMPAT_HOST ? resolve(process.env.PI_COMPAT_HOST) : lockedHost;
-if (process.env.PI_COMPAT_HOST) {
-  const { assertCompatHost } = await import(new URL("../scripts/pi-compat-host.mjs", import.meta.url).href);
-  assertCompatHost(process.env.PI_COMPAT_HOST);
-}
-const executorPath = join(host, "dist/extensions/codemode/execute.js");
-const hostVersion = JSON.parse(readFileSync(join(host, "package.json"), "utf8")).version as string;
 
 function registerHashlineTools() {
   const tools = new Map<string, any>();
@@ -31,9 +23,9 @@ function registerHashlineTools() {
   return tools;
 }
 
-describe.skipIf(!existsSync(executorPath))(`Pi ${hostVersion} codemode scripts`, () => {
+describe(`Pi ${version} codemode scripts`, () => {
   it("receive structured Hashline values and can chain grep anchors into edit", async () => {
-    const { executeCodemode } = await import(pathToFileURL(executorPath).href);
+    const { executeCodemode } = await import(pathToFileURL(executor).href);
     const cwd = mkdtempSync(join(tmpdir(), "pi-host-codemode-"));
     writeFileSync(join(cwd, "a.ts"), "const a = 1; // TODO\nconst b = 2;\n", "utf8");
     const registered = registerHashlineTools();

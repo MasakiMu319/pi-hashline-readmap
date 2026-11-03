@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { jsonOf, runProgram, supported } from "./helpers/codemode-recipes.js";
+import { jsonOf, runProgram, version } from "./helpers/codemode-recipes.js";
 
-it.skipIf(!supported)("captures real selected-host script results", () => {
+it("captures real selected-host script results", () => {
   const report = runProgram({
     files: { "seed.txt": "alpha\nbeta\n" },
     steps: [
@@ -10,14 +10,14 @@ it.skipIf(!supported)("captures real selected-host script results", () => {
       { code: 'text({later:true});' },
     ],
   });
-  assert.equal(report.version, "1.2.0");
+  assert.equal(report.version, version);
   assert.deepEqual(jsonOf(report), { raw: "alpha", next: 2 });
   assert.deepEqual(jsonOf(report, 1), { later: true });
   assert.deepEqual(report.results[0].calls.map((c: any) => c.name), ["read"]);
 }, 130_000);
 
 
-it.skipIf(!supported)("measures final rendered output including outer hygiene notices", () => {
+it("measures final rendered output including outer hygiene notices", () => {
   const report = runProgram({
     steps: [{ code: String.raw`
       const fresh = await tools.read({path:"visible.ts"});

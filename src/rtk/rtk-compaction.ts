@@ -1,5 +1,5 @@
 import type { CompressionInfo } from "./bash-filter.ts";
-import { stripAnsi } from "./ansi.ts";
+import type { Drop } from "./drops.ts";
 
 /**
  * Public, stable bash output contract for RTK compaction metadata.
@@ -12,6 +12,7 @@ export type RtkCompaction = {
   applied: boolean;
   techniques: string[];
   truncated: boolean;
+  dropped: Drop[];
   originalLineCount?: number;
   compactedLineCount?: number;
 };
@@ -19,58 +20,22 @@ export type RtkCompaction = {
 export interface BuildRtkCompactionInput {
   rawInput: string;
   output: string;
+  /** `filterBashOutput`'s `compacted`: a compactor changed the output, beyond ANSI and the anti-pattern hint. */
+  compacted: boolean;
+  /** `filterBashOutput`'s `dropped`: what the compactor reported leaving out, one entry per marker. */
+  dropped: Drop[];
   info: CompressionInfo;
 }
 
-// Matches deterministic truncation markers emitted by RTK routes when they drop output beyond a route budget.
-const ROUTE_TRUNCATION_MARKERS = [
-  /^\.\.\. \d+ lines omitted \.\.\.$/gm,
-  /^\s*\.\.\. \+\d+ more changes$/gm,
-  /^\s*\.\.\. \+\d+ more$/gm,
-  /^\.\.\. and \d+ more commits$/gm,
-  /^\.\.\. and \d+ more errors$/gm,
-  /^\[\.\.\. \d+ more lines\]$/gm,
-];
-const ROUTE_TRUNCATION_TECHNIQUES = new Set<CompressionInfo["technique"]>([
-  "git",
-  "linter",
-  "build-tools",
-  "build",
-  "package-manager",
-  "docker",
-  "file-listing",
-  "http-client",
-  "transfer",
-]);
-
-function extractRouteTruncationMarkers(text: string): string[] {
-  return ROUTE_TRUNCATION_MARKERS.flatMap((marker) => Array.from(text.matchAll(marker), ([match]) => match.trim()));
-}
-
-function markerCounts(markers: string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const marker of markers) counts.set(marker, (counts.get(marker) ?? 0) + 1);
-  return counts;
-}
-
-function introducedRouteTruncationMarker(rawInput: string, output: string): boolean {
-  const rawCounts = markerCounts(extractRouteTruncationMarkers(stripAnsi(rawInput)));
-  const outputCounts = markerCounts(extractRouteTruncationMarkers(output));
-  return Array.from(outputCounts).some(([marker, count]) => count > (rawCounts.get(marker) ?? 0));
-}
-
 export function buildRtkCompaction(input: BuildRtkCompactionInput): RtkCompaction {
-  const { rawInput, output, info } = input;
-  const techniqueRan = info.technique !== "none";
-  const comparisonInput = info.technique === "test-output" ? rawInput : stripAnsi(rawInput);
-  const modifiedOutput = comparisonInput !== output;
-  const applied = techniqueRan && modifiedOutput;
-  const introducedTruncationMarker = introducedRouteTruncationMarker(rawInput, output);
-  const truncated = ROUTE_TRUNCATION_TECHNIQUES.has(info.technique) && modifiedOutput && introducedTruncationMarker;
+  const { rawInput, output, compacted, dropped, info } = input;
+  // The test-output short-circuit only strips ANSI, which this contract counts as its technique applying.
+  const applied = info.technique === "test-output" ? rawInput !== output : compacted;
   const compaction: RtkCompaction = {
     applied,
     techniques: applied ? [info.technique] : [],
-    truncated,
+    truncated: dropped.length > 0,
+    dropped,
   };
   if (rawInput !== "") {
     compaction.originalLineCount = rawInput.split("\n").length;

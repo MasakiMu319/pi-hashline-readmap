@@ -6,9 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-03
+
+### Fixed
+
+- Use a plain numeric fork version so Pi records the release notes as seen instead of repeating the upstream `0.16.1` update on every startup with `0.16.1-masaki.1`.
+
 ### Changed
 
-- MasakiMu319 safety fork (`0.16.1-masaki.1`): anchored edits fail closed on hash-only mismatches, self-inconsistent `LINE:HASH|content` pairs, and ambiguous duplicate content in `applyHashlineEdits`. Window relocation requires a complete `LINE:HASH|content` anchor whose exact content occurs once nearby.
+- Sync the MasakiMu319 maintenance fork with upstream `0.20.0` (`31b44b1`), including anchor freshness fixes, Pi 1.5.0 compatibility, and recoverable, accurately reported Bash compression.
+- Preserve the fork's anchored-edit safety policy: hash-only mismatches fail closed; a complete `LINE:HASH|content` anchor may relocate only to one nearby exact-content match. Fuzzy matches, ambiguous duplicate content, and inconsistent hash/content pairs are refused.
+
+## [0.20.0] - 2026-11-02
+
+Compressed `bash` output no longer misstates `git status` tracking and conflicts, shaped `find` output or build warnings. Each compressor drops only named noise without saying so and reports every other drop in its metadata, and every compressed result names a saved copy of its output before compression, so recovering what was cut never needs a re-run.
+
+### Added
+
+- `details.rtkCompaction.dropped` (mirrored at `details.ptcValue.rtkCompaction`): one `{ count, unit }` per drop marker in the output, in output order, as the compressor reported it when it wrote the marker, so `... and 3 more commits` is `{ count: 3, unit: "commits" }`. A marker-like line the command printed itself is no drop. Always present; `[]` when nothing was dropped.
+- Every compressed result's `[RTK: compressed …]` notice names `Original output: <path>`, the output before compression: Pi's own full-output file when Pi truncated it, else a `0600` temp file holding the compressor's input byte for byte, also with `PI_HASHLINE_BASH_CONTEXT_GUARD=0`. `details.bashOriginalOutput.originalPath` holds the same path, and the context guard's preview reuses it. If the copy cannot be written, the output is not compressed: it passes through as under `PI_RTK_BYPASS=1`, with `details.compressionInfo.bypassedBy: "unsaved-original"` and `details.bashOriginalOutput.snapshotWriteError` saying why. Before, a copy was saved only when the context guard trimmed, and the notice named only `PI_RTK_BYPASS=1 <command>`.
+
+### Fixed
+
+- `details.rtkCompaction.truncated` is true exactly when `dropped` is non-empty, set by the compressor's own drop rather than by matching marker text. Before, a 21-line `git log --oneline` whose dropped 21st line read `... and 1 more lines` reported `truncated: false`.
+- `git status -sb` keeps the branch line's tracking (`📌 main...origin/main [ahead 1]`) and lists every unmerged path with its code (`DD AU UD UA DU AA UU`) under a last `⚠️ Conflicts: N files` section that no budget cuts. Before, it showed `📌 main` and listed `DU a.ts` under Staged. Type changes (`T`), worktree renames and copies, and intent-to-add files are listed as changes, and `!!` paths under `🚫 Ignored`, cut at 3 with `  ... and N more files`.
+- `find` with an action that shapes its output (`-printf`, `-fprintf`, `-ls`, `-fls`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-print0`, `-fprint0`) passes through unchanged. Before, `find src -printf '%s %p\n'` was summarized into per-directory counts and lost its file names, and `find -exec eslint` was read as a linter run.
+- A successful build keeps its warnings: up to 5, each cut at 10 lines by `  ... and N more lines`, then `... and N more warnings`, the budget errors already had. A failed command's output still passes through uncompressed. Only real diagnostics count: cargo's `generated N warnings` summary is no warning, so one cargo warning reports `1 warning(s)`, not 2. tsc warnings (`path(l,c): warning TSn:`) are read too. Before, `npm run build` with a tsc warning returned only `✓ Build successful (1 units compiled)`.
+- Every route drops only the noise `docs/bash-output.md` names beside its markers, and keeps or counts every other line: the linter's per-file cut of its top 3 rules ends `    ... and N more rules` and lines that are no finding are kept; `git diff` keeps renames, file modes, binary-file lines, git's warnings and headers it can't read, and passes output without `diff --git` through; a build keeps lines outside its diagnostics; Gradle keeps a `FAILED` task line; Docker builds and package-manager installs drop only their named noise; `rsync`'s file list is kept to 10 entries, then `... and N more files`.
+
+## [0.19.2] - 2026-11-02
+
+Compressed `bash` output says more truthfully what it dropped: `git log` keeps whole commits, each size-budget cut listed below ends in a marker with the true count and unit, and `details.rtkCompaction` reports `applied` and `truncated` as the compressor acted.
+
+### Fixed
+
+- `git log` keeps whole commits. Past 20 commits it keeps the first 20 with their full bodies and ends `... and N more commits`, with or without `--graph`; output without commit headers (`--oneline`, `--format`) keeps 20 lines and ends `... and N more lines`. Before, it cut lines to 80 characters and counted dropped lines as commits: `git log -3` kept one commit and reported `... and 33 more commits`.
+- These size-budget cuts end in a marker naming the true count in its own unit, and the marker sets `details.rtkCompaction.truncated`: `... and N more lines` for `git diff` past 100 output lines (was `... +N more changes`) and `  ... (N context lines)` for its per-hunk context cut, `  ... and N more files` for `git status` (was `... +N more`), `  ... and N more lines` for a long build error (was a bare `...`), `  ... and N more rules` and `  ... and N more files` for the linter's top-10 lists (cut with no marker before), `Total: N entries in M directories` for `find` (was `N files`, counting directories too), and `[... N more lines]` for an HTTP body past 200 lines. In `git diff`, a build error and an HTTP body, a trailing newline no longer counts as a dropped line. Filters that drop only noise set nothing. See the marker table in `docs/bash-output.md`.
+- `find` output is summarized past 100 entries rather than 100 lines, and `ls -R` and `tree` output passes through unchanged, since their headers and tree lines can't be counted as entries.
+- A `bash` result that only gained a tool hint (such as `find`'s hint to prefer the file-search tools) reports `details.rtkCompaction.applied: false, techniques: []`. Before, a 2-line `find src -name '*.ts'` reported `applied: true, techniques: ["file-listing"]`. A test command's ANSI-only result still reports `applied: true, techniques: ["test-output"]`.
+
+## [0.19.1] - 2026-11-02
+
+`bash` compression no longer drops or mislabels output from chained or piped commands, and every compressed result says how to see the full output.
+
+### Fixed
+
+- A chained or piped `bash` command line is compressed only when exactly one of its parts prints, and that part picks the compressor. Before, the first command decided for the whole output: `git log -3; gh pr view 259 --json body` ran through the `git log` compressor, which replaced the PR body with "… and N more commits". Parts known to print nothing (`cd`, `pushd`, `popd`, `export`, `unset`, `set`, `mkdir -p`, `true`, `:`, bare assignments) and parts that feed a pipe don't count, so `cd sub && git diff` still compresses as `git diff`, while `git diff | cat` and `git status && git diff` pass through. See `docs/bash-output.md`.
+- Every `bash` result a compressor changed starts with the `[RTK: compressed …]` notice naming `PI_RTK_BYPASS=1 <command>`, whatever its size. Before, a result under 2000 B or one that saved less than half carried no notice, so a shortened `git log -3` gave no sign that lines were missing.
+
+## [0.19.0] - 2026-11-02
+
+Pi 1.5.0 is now the one tested host. No tool behaves differently.
+
+### Changed
+
+- The extension is developed and tested against exactly one Pi host, Pi 1.5.0, which `package-lock.json` locks; Pi 1.4.0 is no longer tested. Peer ranges stay `"*"`.
+- On Pi 1.5 and newer, Pi's "Extension Updates" notice shows this changelog's new entries on the first fresh launch after you update the extension; Pi's `collapseChangelog` setting condenses it to one line. A test runs the tested Pi's own changelog parser on this file, so an entry Pi cannot read fails CI.
+
+## [0.18.0] - 2026-11-01
+
+Pi 1.4.0 is now the one tested host, and the tools this extension replaces regain what Pi's built-ins gained since 0.84.2.
+
+### Added
+
+- `read`, `edit`, `write` and `bash` request Pi's `strict: "prefer"` constrained sampling (`{ type: "json_schema", strict: "prefer" }`), as the built-ins they replace do. On a provider that supports it, `read`, `write` and `bash` arguments are sampled against their schemas, where every optional field becomes required and nullable; a `null` runs as if the field were omitted, as it already did. `edit`'s schema does not pass the host's strict conversion, so Pi sends it unconstrained.
+- A finished `bash` row shows how long the command took (`↳ 1 line returned • Took 4.2s`), from the duration the host records and formatted as the built-in `bash` row formats it. A partial row, or a host that records no duration, shows none.
+
+### Changed
+
+- The extension is developed and tested against exactly one Pi host, Pi 1.4.0, which `package-lock.json` locks. Hosts older than the lock are no longer tested, and CI runs a single host lane instead of the locked Pi 0.84.2 lane plus a separately installed Pi 1.2.0 lane. Peer ranges stay `"*"`.
+- `PI_COMPAT_HOST=<pi-coding-agent install>` runs the host tests and `npm run typecheck:pi-host` against another Pi before the lock moves, expecting that install's own version; unset, the locked host is selected. A missing install fails instead of falling back. See AGENTS.md's "Host compatibility".
+
+### Fixed
+
+- An expanded failed `bash` row whose output starts with a blank line heads with `command failed` instead of a bare `↳`.
+
+## [0.17.0] - 2026-10-31
+
+Anchor freshness now matches what the model sees: the extension's own edits keep a file's anchors usable, and any `bash` change to a file expires them. Thanks to @llehouerou, whose PRs #237–#240 found these four defects and proposed the fixes this release ships in reworked form.
+
+### Fixed
+
+- An anchored `edit` after the extension's own successful `edit` or `write` to the same file no longer demands a re-read on the next turn. The own mutation used to expire the file's freshness, so the shift remapping for own writes never ran across turns; a change made outside the extension (bash, another process) still requires fresh anchors. A cross-file `move_lines` no longer tells the model to re-read the source; it reports the source's line shift instead. Based on #237 by @llehouerou.
+- `edit` and `write` declare Pi's sequential execution mode, so a turn that contains either runs its calls in call order. A `read` batched after an `edit` of the same file used to run concurrently with it and could show the pre-edit file, so the next anchored edit through it failed. Turns without an `edit` or `write` still run in parallel. Based on #238 by @llehouerou.
+- `bash` commands are checked for file changes in every command of a chain (after `;`, `&&`, `||`, `|`, newlines, keywords such as `if`/`then`, `NAME=value` prefixes, subshells and `$(…)` substitutions), not only in the first word of the line. Heredoc bodies and a quoted `>` no longer count as writes, and `<<<` no longer opens a heredoc. Relative targets resolve against a literal `cd` earlier in the command; after a `cd` it cannot follow, only absolute targets count, and a subshell's `cd` ends at its `)`. A command behind `sudo`, `env`, `command`, `exec` or `xargs` is still not detected. Based on #240 by @llehouerou.
+- A file that a `bash` command changes needs fresh anchors before the next anchored `edit`, even when the command failed or the file is known only from `write` or `edit`. Freshness used to expire only through a stale earlier read, and only after a successful command, so a file known only from `write` or `edit`, or one changed by a failed `cmd > file`, kept accepting its old anchors. Based on #239 by @llehouerou.
 
 ## [0.16.1] - 2026-10-14
 

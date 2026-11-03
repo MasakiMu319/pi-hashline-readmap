@@ -1,4 +1,6 @@
 import { dirname } from "path";
+import { dropMarker, type Drop } from "./drops.ts";
+import { commandWords, parseShellCommands } from "../bash-command-state.ts";
 
 const LONG_FORMAT_LS_ROW_RE = /^[bcdlps-][rwxStTs-]{9}[+@.]?\s+/;
 const LONG_FORMAT_LS_TOTAL_RE = /^total\s+\d+\s*$/;
@@ -10,28 +12,29 @@ function isLongFormatLsLine(line: string): boolean {
   );
 }
 
-export function isFileListingCommand(cmd: string): boolean {
-  const c = cmd.trim().toLowerCase();
-  if (c.startsWith("find ") || c === "find") return true;
-  if (c.startsWith("tree") && (c === "tree" || c.charAt(4) === " ")) return true;
-  // ls with recursive or long flags
-  if (c.startsWith("ls ")) {
-    const rest = c.slice(3);
-    const shortFlagRe = /(?:^|\s)-([a-zA-Z]+)/g;
-    let m;
-    while ((m = shortFlagRe.exec(rest)) !== null) {
-      if (m[1].includes("r") || m[1].includes("l")) return true;
-    }
-  }
-  return false;
+// Actions whose output is no one bare path per line (`-ls`, `-printf`, a command's own output, NUL separators, prompts).
+const OUTPUT_SHAPING_ACTIONS = new Set(["-printf", "-fprintf", "-ls", "-fls", "-exec", "-execdir", "-ok", "-okdir", "-print0", "-fprint0"]);
+
+/** A `find` command's words, quotes removed; undefined for any other command. */
+function findWords(cmd: string): readonly string[] | undefined {
+  const words = commandWords(parseShellCommands(cmd, undefined).commands.find((part) => !part.inSubstitution)?.words ?? []);
+  return words[0]?.toLowerCase() === "find" ? words : undefined;
 }
 
-export function compressFileListingOutput(output: string): string | null {
+export function isFindCommand(cmd: string): boolean {
+  return findWords(cmd) !== undefined;
+}
+
+// Only plain `find` prints one path per line; an `ls -R` or `tree` summary would count headers and tree lines as entries.
+export function isFileListingCommand(cmd: string): boolean {
+  const words = findWords(cmd);
+  return words !== undefined && !words.some((word) => OUTPUT_SHAPING_ACTIONS.has(word));
+}
+
+export function compressFileListingOutput(output: string, drops: Drop[] = []): string | null {
   const rawLines = output.split("\n");
   if (rawLines.some(isLongFormatLsLine)) return null;
-  if (rawLines.length <= 100) return output;
   const lines = rawLines.filter((line) => line.trim() !== "");
-
   const errors: string[] = [];
   const dirCounts = new Map<string, number>();
   let totalFiles = 0;
@@ -54,6 +57,7 @@ export function compressFileListingOutput(output: string): string | null {
     dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
     totalFiles++;
   }
+  if (totalFiles <= 100) return output;
 
   const result: string[] = [];
 
@@ -65,11 +69,11 @@ export function compressFileListingOutput(output: string): string | null {
   // Sort directories by count descending
   const sorted = [...dirCounts.entries()].sort((a, b) => b[1] - a[1]);
   for (const [dir, count] of sorted) {
-    result.push(`${dir}/ (${count} files)`);
+    result.push(`${dir}/ (${count} entries)`);
   }
 
   result.push("");
-  result.push(`Total: ${totalFiles} files in ${dirCounts.size} directories`);
+  result.push(dropMarker(drops, totalFiles, "entries", `Total: ${totalFiles} entries in ${dirCounts.size} directories`));
 
   return result.join("\n");
 }

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 const pkg = JSON.parse(readFileSync("package.json", "utf8")); const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
 describe("MasakiMu319 fork package contents", () => {
   it("versions package/lock and ships every README-linked document and documented scanner", () => {
-    expect(pkg.version).toBe("0.16.1-masaki.1"); expect(lock.version).toBe("0.16.1-masaki.1"); expect(lock.packages[""].version).toBe("0.16.1-masaki.1");
+    expect(pkg.version).toBe("0.20.1"); expect(lock.version).toBe("0.20.1"); expect(lock.packages[""].version).toBe("0.20.1");
     expect(pkg.files).toContain("docs/"); expect(pkg.files).toContain("scripts/scan-ambiguous-read-calls.mjs");
     expect(pkg.files).toContain("scripts/scan-ambiguous-read-calls.d.mts");
     const readme = readFileSync("README.md", "utf8"); const linked = [...readme.matchAll(/\]\((docs\/[^)#]+\.md)(?:#[^)]+)?\)/g)].map((match) => match[1]);

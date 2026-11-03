@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { selectCompatHost } from "../../scripts/pi-compat-host.mjs";
 
-const locked = resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..");
-export const host = process.env.PI_COMPAT_HOST ? resolve(process.env.PI_COMPAT_HOST) : locked;
-export const supported = existsSync(join(host, "dist/extensions/codemode/execute.js"));
-if (process.env.PI_COMPAT_HOST && !supported) {
-  throw new Error("Explicit compatibility host has no codemode executor");
-}
+export const { host, version } = selectCompatHost();
+export const executor = join(host, "dist/extensions/codemode/execute.js");
+if (!existsSync(executor)) throw new Error(`Selected Pi host ${version} has no codemode executor at ${executor}`);
 export interface RecipeProgram {
   files?: Record<string, string>;
   inspect?: string[];
@@ -47,7 +44,7 @@ export function recipe(id: string): string {
 }
 /**
  * Prepends seed statements to a recipe while keeping a leading `// @options:` line first.
- * Pi 1.2.0+ rejects an options line that is not the first line of the script.
+ * The selected host rejects an options line that is not the first line of the script.
  */
 export function seeded(seed: string, code: string): string {
   const statements = seed.endsWith("\n") ? seed : seed + "\n";

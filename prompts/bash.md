@@ -11,6 +11,7 @@ type RtkCompaction = {
   applied: boolean;
   techniques: string[];
   truncated: boolean;
+  dropped: { count: number; unit: string }[];
   originalLineCount?: number;
   compactedLineCount?: number;
 };
@@ -22,22 +23,32 @@ The same value is mirrored at `details.ptcValue.rtkCompaction` (deep-equal).
 
 - **`applied`** — `true` iff at least one RTK technique modified the bash
   output. `false` means RTK had the **opportunity** to run but produced no
-  change.
+  change. Stripping ANSI codes and appending an anti-pattern hint are no
+  compaction, except under `test-output`, whose one technique is ANSI
+  stripping.
 - **`techniques`** — ordered array of technique IDs that fired. Today the
   pipeline reports at most one entry; the field is an array so multi-technique
   pipelines remain representable without a contract change. Possible IDs are the
   values used in `src/rtk/bash-filter.ts`: `git`, `linter`, `build-tools`,
   `build`, `package-manager`, `docker`, `file-listing`, `http-client`,
   `transfer`, `test-output`.
-- **`truncated`** — `true` iff an RTK route truncated output beyond a size
-  budget *inside* the routed compression step. This is detected from the
-  deterministic truncation markers emitted by current RTK routes (for example
-  `... N lines omitted ...`, `... +N more changes`, and `[... N more lines]`).
+- **`truncated`** — `true` iff an RTK route cut output past a size budget
+  *inside* the routed compression step, ending the cut with a marker that
+  names the true count in its unit (for example `... and N more lines`,
+  `  ... and N more files`, `[... N more lines]`, `Total: N entries in M
+  directories`; `docs/bash-output.md` lists them all): exactly when `dropped`
+  is non-empty. Noise filters, such as dropped progress lines, set nothing.
   Only routed RTK compression techniques can set this field; post-RTK guard
   trimming and test-output ANSI normalization do not.
+- **`dropped`** — one `{ count, unit }` per drop marker in the output, in
+  output order, as the route reported it when it wrote the marker (`... and 3
+  more commits` is `{ count: 3, unit: "commits" }`). A marker-like line the
+  command printed itself is no drop. Always present; `[]` when nothing was
+  dropped.
 - **`originalLineCount` / `compactedLineCount`** — newline-split line counts of
-  the pre-RTK and post-RTK strings. Both are present when measurable; both are
-  omitted when not (e.g. the empty-input fast path).
+  the pre-RTK and post-RTK strings, the post-RTK one counting any anti-pattern
+  hint. Both are present when measurable; both are omitted when not (e.g. the
+  empty-input fast path).
 
 ### Presence guarantee
 
@@ -62,7 +73,12 @@ post-RTK `bashContextGuard` layer has its own metadata at
 
 - `details.bashContextGuard` — post-RTK recoverable context guard metadata.
 - `details.bashOriginalOutput` — pointer/snapshot of the original pre-RTK output
-  when the guard trimmed visible text.
+  whenever RTK compacted the output or the guard trimmed visible text. Its
+  `originalPath` is the path the RTK notice names as `Original output: <path>`:
+  Pi's full-output file when Pi truncated, else a `0600` temp copy of the
+  pre-RTK output byte for byte. Read it to recover what was cut without
+  re-running the command. When no copy can be saved, RTK leaves the output
+  uncompressed and `snapshotWriteError` says why.
 - `details.compressionInfo` — internal diagnostic shape (byte counts, single
   technique, bypass marker); kept for backwards compatibility but **not** the
   stable consumer surface — use `details.rtkCompaction` instead.

@@ -20,12 +20,12 @@ import { applyBashContextGuard, resolveBashContextGuardConfig, type BashContextG
 import { applyContextHygieneStaleContext } from "./src/context-application.js";
 import { consumeContextHygieneNotice, resetContextHygieneNoticeLedger } from "./src/context-hygiene-notices.js";
 import { buildBashCommandState } from "./src/bash-command-state.js";
+import { createReadFreshness } from "./src/read-freshness.js";
 import {
   buildCommandResource,
   buildContextHygieneMetadata,
   buildFileResource,
   getContextHygieneTracker,
-  normalizePathForContextHygiene,
   registerContextHygieneDebugTool,
   resetContextHygieneTracker,
   type ContextHygieneAppliedEffects,
@@ -141,23 +141,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+// Every compaction names its saved original and its bypass, whatever its size: the full output
+// must stay recoverable. Only a compacted result passes a path.
 function buildRtkNotice(
-  info: {
-    originalBytes: number;
-    outputBytes: number;
-    compressionRatio: number;
-    technique: string;
-    bypassedBy?: string;
-  },
+  info: { originalBytes: number; outputBytes: number; compressionRatio: number; technique: string },
   command: string,
-  outputIsEmpty: boolean,
+  originalPath: string | undefined,
 ): string | null {
-  if (info.bypassedBy !== undefined) return null;
-  if (outputIsEmpty) return null;
-  if (info.originalBytes <= 2000) return null;
-  if (info.compressionRatio >= 0.5) return null;
+  if (!originalPath) return null;
   const pct = Math.round((1 - info.compressionRatio) * 100);
-  return `[RTK: compressed ${info.technique} output ${formatBytes(info.originalBytes)} → ${formatBytes(info.outputBytes)} (${pct}% saved). Use \`PI_RTK_BYPASS=1 ${command}\` to see full output.]`;
+  return `[RTK: compressed ${info.technique} output ${formatBytes(info.originalBytes)} → ${formatBytes(info.outputBytes)} (${pct}% saved). Original output: ${originalPath}. Use \`PI_RTK_BYPASS=1 ${command}\` to re-run uncompressed.]`;
 }
 
 function willBashContextGuardTrim(text: string, config: BashContextGuardConfig): boolean {
@@ -168,30 +161,12 @@ export default function piHashlineReadmapExtension(pi: ExtensionAPI): void {
   // Codemode integration wraps outermost so annotations/outputSchema are set before the raw
   // argument guard forwards the (same, mutated) definition to Pi.
   pi = withCodemodeIntegration(withRawArgumentGuard(pi));
-  // readTurns maps an absolute path to the tracker event id of the most recent
-  // live-anchor tool result for that path (read / grep / ast_search / write).
-  // When the provider-context handler masks a prior live-anchor read into a
-  // stale placeholder, we expire the corresponding entry so wasReadInSession
-  // stops returning true until the agent re-reads the file.
-  const readTurns = new Map<string, number>();
   const doomLoopState = createDoomLoopState();
   resetContextHygieneTracker();
   resetContextHygieneNoticeLedger();
-  const readTurnKey = (absolutePath: string) => normalizePathForContextHygiene(absolutePath);
-  const noteRead = (absolutePath: string) => {
-    // noteRead is invoked synchronously from inside read/grep/ast_search/write
-    // BEFORE the tool result is dispatched to the tool_result handler that
-    // calls tracker.record(). So the just-finishing tool's event will receive
-    // id = report.eventCount + 1 once tool_result fires. We anchor readTurns
-    // to that anticipated id so the entry is strictly newer than every
-    // mutation event id <= the current eventCount, which is exactly what
-    // expireStaleReadTurns compares against.
-    const tracker = getContextHygieneTracker();
-    const report = tracker.generateReport();
-    const eventId = report.eventCount + 1;
-    readTurns.set(readTurnKey(absolutePath), eventId);
-  };
-  const wasReadInSession = (absolutePath: string) => readTurns.has(readTurnKey(absolutePath));
+  const freshness = createReadFreshness(() => getContextHygieneTracker().generateReport().eventCount);
+  const noteRead = freshness.note;
+  const wasReadInSession = freshness.has;
 
   // Programmatic callers (Pi codemode scripts) reach these tools through Pi's own
   // ctx.executeTool(); see src/codemode-integration.ts. No side-channel executor map is published.
@@ -226,30 +201,11 @@ export default function piHashlineReadmapExtension(pi: ExtensionAPI): void {
     return undefined;
   });
 
-  // Expire readTurns entries whose tracked live-anchor event id has been
-  // superseded by a later same-file mutation (i.e. the prior read has been
-  // masked into a stale placeholder by applyContextHygieneStaleContext).
-  // After expiry, edit's read-before-edit guard correctly forces a re-read.
-  const expireStaleReadTurns = (
-    report: ReturnType<ReturnType<typeof getContextHygieneTracker>["generateReport"]>,
-  ) => {
-    if (readTurns.size === 0) return;
-    for (const candidate of report.staleCandidates) {
-      if (!candidate.resourceKey.startsWith("file:")) continue;
-      const absolutePath = readTurnKey(candidate.resourceKey.slice("file:".length));
-      const recordedEventId = readTurns.get(absolutePath);
-      if (recordedEventId === undefined) continue;
-      if (recordedEventId <= candidate.mutationEventId) {
-        readTurns.delete(absolutePath);
-      }
-    }
-  };
-
   pi.on("context", (event: any): any => {
     if (!Array.isArray(event.messages)) return undefined;
     const report = getContextHygieneTracker().generateReport();
     const messages = applyContextHygieneStaleContext(event.messages, report);
-    expireStaleReadTurns(report);
+    freshness.expireFromReport(report);
     if (messages === event.messages) return undefined;
     return { messages };
   });
@@ -320,7 +276,7 @@ export default function piHashlineReadmapExtension(pi: ExtensionAPI): void {
     const originalSelection = selectBashOriginalOutput({
       visibleText: originalText,
       fullOutputPath: existingDetails.fullOutputPath,
-      enabled: bashContextGuardConfig.enabled,
+      restore: bashContextGuardConfig.enabled,
     });
 
     const command =
@@ -347,13 +303,9 @@ export default function piHashlineReadmapExtension(pi: ExtensionAPI): void {
       commandState,
     });
     const recordedContextHygieneEvent = recordContextHygiene(contextHygiene, event.toolCallId, !nested);
-    if (
-      event.isError !== true &&
-      commandState?.stateKind === "shell-file-mutation" &&
-      (commandState.fileTargets?.length ?? 0) > 0
-    ) {
-      expireStaleReadTurns(getContextHygieneTracker().generateReport());
-    }
+    // Expire directly, not through stale candidates: a file known only from write or edit has no
+    // read for a candidate to name, and a failed `cmd > file` has already truncated it.
+    for (const target of commandState?.fileTargets ?? []) freshness.expirePath(target);
     const appliedEffects = summarizeBashAppliedEffects(recordedContextHygieneEvent.id);
     const contextHygieneForDetails: ContextHygieneMetadata = hasAppliedEffects(appliedEffects)
       ? { ...contextHygiene, appliedEffects }
@@ -366,34 +318,45 @@ export default function piHashlineReadmapExtension(pi: ExtensionAPI): void {
       if (prefixParts.length === 0) return body;
       return `${prefixParts.join("\n\n")}\n\n---\n${body}`;
     };
-    const { output, savedChars, info } = filterBashOutput(
-      command,
-      originalSelection.inputForRtk,
-      { isError: event.isError === true },
-    );
+    const filterOptions = { isError: event.isError === true };
+    let filtered = filterBashOutput(command, originalSelection.inputForRtk, filterOptions);
+    // A compacted result names a saved pre-RTK copy; the guard's preview reuses it.
+    const originalMetadata = filtered.compacted
+      ? ensureBashOriginalOutputSnapshot({
+          visibleText: originalSelection.inputForRtk,
+          metadata: originalSelection.metadata,
+        })
+      : originalSelection.metadata;
+    // No saved copy, no cut: what a compactor drops must stay recoverable without a re-run.
+    if (filtered.compacted && !originalMetadata?.originalPath) {
+      filtered = filterBashOutput(command, originalSelection.inputForRtk, { ...filterOptions, bypass: "unsaved-original" });
+    }
+    const { output, savedChars, compacted, dropped, info } = filtered;
     if (process.env.PI_RTK_SAVINGS === "1") {
       process.stderr.write(`[RTK] Saved ${savedChars} chars (${command})\n`);
     }
-    const notice = buildRtkNotice(info, command, output === "");
+    const notice = buildRtkNotice(info, command, compacted ? originalMetadata?.originalPath : undefined);
     const body = notice ? `${notice}\n${output}` : output;
     const finalText = applyWarning(body);
     const originalMetadataForGuard = willBashContextGuardTrim(finalText, bashContextGuardConfig)
       ? ensureBashOriginalOutputSnapshot({
           visibleText: originalText,
-          metadata: originalSelection.metadata,
+          metadata: originalMetadata,
           enabled: bashContextGuardConfig.enabled,
         })
-      : originalSelection.metadata;
+      : originalMetadata;
     const guarded = applyBashContextGuard({
       text: finalText,
       command,
       originalMetadata: originalMetadataForGuard,
       config: bashContextGuardConfig,
     });
-    const bashOriginalOutput = guarded.metadata.trimmed ? originalMetadataForGuard : originalSelection.metadata;
+    const bashOriginalOutput = guarded.metadata.trimmed ? originalMetadataForGuard : originalMetadata;
     const rtkCompaction = buildRtkCompaction({
       rawInput: originalSelection.inputForRtk,
       output,
+      compacted,
+      dropped,
       info,
     });
     const existingPtcValue =

@@ -3,7 +3,7 @@ import {
   classifyCommandForContextHygiene,
   normalizeCommandForContextHygiene,
   type ContextHygieneCommandKind,
-} from "./context-hygiene.js";
+} from "./context-hygiene.ts";
 
 export type BashCommandStateKind =
   | "repo-status"
@@ -40,8 +40,25 @@ export interface BashCommandState {
 const GIT_WORKTREE_MUTATION_RE =
   /^git\s+(add|apply|am|checkout|clean|commit|merge|mv|pull|rebase|reset|restore|rm|stash|switch)\b/;
 
-const REDIRECTION_RE = /(?:^|[\s;|&])(?:\d?>>?|&>|>>|>)\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g;
-const TEE_RE = /(?:^|[|;&]\s*)tee((?:\s+(?:"[^"]+"|'[^']+'|[^\s;&|]+))*)/g;
+/** What the word after each redirection operator is. */
+const REDIRECTION_OPERATORS: Record<string, "write" | "dup" | "ignore" | "heredoc" | "heredoc-strip"> = {
+  ">": "write",
+  ">>": "write",
+  ">|": "write",
+  "&>": "write",
+  "&>>": "write",
+  ">&": "dup",
+  "<": "ignore",
+  "<&": "ignore",
+  "<>": "ignore",
+  "<<<": "ignore",
+  "<<": "heredoc",
+  "<<-": "heredoc-strip",
+};
+const REDIRECTION_OPERATOR_RE = /^(?:&>>?|>[>|&]?|<<[<-]?|<[&>]?)/;
+
+/** Words that can precede a simple command's name. */
+const COMMAND_PREFIX_KEYWORDS = new Set(["!", "{", "if", "then", "elif", "else", "do", "while", "until", "time"]);
 
 function containsDiagnostics(text: string): boolean {
   return /\b(error TS\d+|TypeError:|ReferenceError:|SyntaxError:|AssertionError:|\bat\s+\S+\s+\([^)]*:\d+:\d+\)|FAIL\b)/.test(text);
@@ -53,11 +70,12 @@ function isSafeLiteralShellTarget(target: string): boolean {
   if (target.startsWith("-")) return false;
   return true;
 }
-function normalizeShellTarget(rawTarget: string, cwd: string): string | undefined {
-  const trimmed = rawTarget.trim();
-  if (!trimmed || trimmed === "/dev/null" || /^&\d+$/.test(trimmed)) return undefined;
-  if (!isSafeLiteralShellTarget(trimmed)) return undefined;
-  return path.resolve(cwd, trimmed);
+/** `cwd` undefined: a `cd` the classifier could not follow, so only absolute targets are known. */
+function normalizeShellTarget(target: string, cwd: string | undefined): string | undefined {
+  if (!target || target === "/dev/null") return undefined;
+  if (!isSafeLiteralShellTarget(target)) return undefined;
+  if (cwd === undefined) return path.isAbsolute(target) ? path.resolve(target) : undefined;
+  return path.resolve(cwd, target);
 }
 
 function pushUniqueTarget(targets: string[], target: string | undefined): void {
@@ -65,60 +83,227 @@ function pushUniqueTarget(targets: string[], target: string | undefined): void {
   targets.push(target);
 }
 
-function splitShellWords(input: string): string[] {
-  const words: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
+/**
+ * One simple command: its source text (first word to last, redirections included), its words with quotes
+ * removed, the files its redirections write, the directory it runs in, whether it runs inside a `$(…)`,
+ * backtick, `<(…)` or `>(…)` substitution, and whether a `|` or `|&` sends its stdout on.
+ */
+export interface SimpleCommand {
+  text: string;
+  words: string[];
+  writes: string[];
+  cwd: string | undefined;
+  inSubstitution: boolean;
+  feedsPipe: boolean;
+}
 
-  for (const char of input.trim()) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
+interface Heredoc {
+  delimiter: string;
+  stripTabs: boolean;
+}
+
+/** Index of the quote closing the one at `start`; only `'` ignores backslashes. */
+function closingQuote(source: string, start: number): number {
+  const quote = source[start];
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === "\\" && quote !== "'") index += 1;
+    else if (source[index] === quote) return index;
+  }
+  return source.length;
+}
+
+/** Index just past the heredoc bodies that start at `start`, in the order their operators appeared. */
+function skipHeredocBodies(source: string, start: number, heredocs: readonly Heredoc[]): number {
+  let index = start;
+  for (const { delimiter, stripTabs } of heredocs) {
+    while (index < source.length) {
+      const newline = source.indexOf("\n", index);
+      const lineEnd = newline < 0 ? source.length : newline;
+      const line = source.slice(index, lineEnd);
+      index = lineEnd + 1;
+      if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) break;
     }
-    if (char === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
+  }
+  return Math.min(index, source.length);
+}
+
+/**
+ * Simple commands of a shell command line, split at `;` `&` `&&` `|` `||` `|&` newlines `(` `)`
+ * outside quotes. Heredoc bodies and comments belong to no command. `$(…)`, backticks, `<(…)` and
+ * `>(…)` are parsed as commands of their own. `${…}`, `$((…))` and `((…))` are inert text except for
+ * the substitutions inside them. Inside a substitution (`inSubstitution`), parsing stops at its
+ * unmatched `)`, and `end` is that index. Each command's `cwd` follows literal `cd`s from `cwd`;
+ * a subshell or substitution keeps its `cd`s inside.
+ *
+ * shortcut: a subset of bash, the one agents write; known misses: `case` patterns' `)` inside `$(…)`,
+ * `$'…'` quoting, `[[ a > b ]]` read as a redirection, a `cd` taken as done even when it fails, sits
+ * in a function body, or runs in a pipeline or behind `&`, `CDPATH` ignored, a group piped as a whole
+ * (`(a; b) | c`, `{ …; } | c`, `done | c`) leaving its inner commands' `feedsPipe` false. Upgrade to a
+ * real bash parser if misses turn up.
+ */
+export function parseShellCommands(
+  source: string,
+  cwd: string | undefined,
+  start = 0,
+  inSubstitution = false,
+): { commands: SimpleCommand[]; end: number } {
+  const commands: SimpleCommand[] = [];
+  const heredocs: Heredoc[] = [];
+  // The directory each open subshell returns to at its `)`.
+  const subshellDirs: (string | undefined)[] = [];
+  let command: Pick<SimpleCommand, "words" | "writes"> = { words: [], writes: [] };
+  let word = "";
+  let inWord = false;
+  let quoted = false;
+  let pending: (typeof REDIRECTION_OPERATORS)[string] | undefined;
+  // Source span of the current word and of the current command; a start of -1 is none yet.
+  let wordStart = -1;
+  let textStart = -1;
+  let textEnd = -1;
+
+  const endWord = () => {
+    if (!inWord) return;
+    if (textStart < 0) textStart = wordStart;
+    textEnd = index;
+    if (pending === "write" || (pending === "dup" && !/^(?:\d+-?|-)$/.test(word))) command.writes.push(word);
+    else if (pending === "heredoc" || pending === "heredoc-strip") heredocs.push({ delimiter: word, stripTabs: pending === "heredoc-strip" });
+    else if (pending === undefined) command.words.push(word);
+    word = "";
+    inWord = quoted = false;
+    pending = undefined;
+  };
+  const endCommand = (feedsPipe = false) => {
+    endWord();
+    if (command.words.length > 0 || command.writes.length > 0) {
+      commands.push({ ...command, text: source.slice(textStart, textEnd), cwd, inSubstitution, feedsPipe });
+      const words = commandWords(command.words);
+      if (words[0] === "cd") {
+        const operands = nonOptionOperands(words.slice(1));
+        cwd = operands.length === 1 ? normalizeShellTarget(operands[0], cwd) : undefined;
+      }
     }
-    if (quote) {
-      if (char === quote) {
-        quote = null;
+    command = { words: [], writes: [] };
+    pending = undefined;
+    textStart = -1;
+  };
+  const opensExpansion = (at: number): boolean =>
+    source[at] === "`" || (source[at] === "$" && (source[at + 1] === "(" || source[at + 1] === "{"));
+  // Last index of the expansion opening at `start`; the commands it runs join `commands`.
+  const scanExpansion = (start: number): number => {
+    if (source[start] === "`") {
+      const end = closingQuote(source, start);
+      const inner = parseShellCommands(source.slice(start + 1, end), cwd).commands;
+      commands.push(...inner.map((part) => ({ ...part, inSubstitution: true })));
+      return end;
+    }
+    if (source[start + 1] === "{") return inertSpan(start + 2, "{", "}");
+    if (source[start] === "$" && source[start + 2] === "(") return inertSpan(start + 2, "(", ")");
+    const inner = parseShellCommands(source, cwd, start + 2, true);
+    commands.push(...inner.commands);
+    return inner.end;
+  };
+  // Index of the `close` matching the `open` just before `start`, running only the substitutions between.
+  const inertSpan = (start: number, open: string, close: string): number => {
+    let depth = 1;
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index];
+      if (char === "\\") index += 1;
+      else if (char === "'") index = closingQuote(source, index);
+      else if (opensExpansion(index)) index = scanExpansion(index);
+      else if (char === '"') {
+        for (index += 1; index < source.length && source[index] !== '"'; index += 1) {
+          if (source[index] === "\\") index += 1;
+          else if (opensExpansion(index)) index = scanExpansion(index);
+        }
+      } else if (char === open) depth += 1;
+      else if (char === close && (depth -= 1) === 0) return index;
+    }
+    return source.length;
+  };
+  // Appends the expansion opening at `start` to the word and returns its last index. A heredoc delimiter is
+  // only quote-removed, so the commands inside it never run.
+  const expansion = (start: number): number => {
+    const commandCount = commands.length;
+    const end = scanExpansion(start);
+    if (pending === "heredoc" || pending === "heredoc-strip") commands.length = commandCount;
+    word += source.slice(start, end + 1);
+    inWord = true;
+    return end;
+  };
+
+  let index = start;
+  for (; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (!inWord) wordStart = index;
+    if (char === "\\") {
+      if (next !== "\n") {
+        word += next ?? "";
+        inWord = quoted = true;
+      }
+      index += 1;
+    } else if (char === "'") {
+      const end = closingQuote(source, index);
+      word += source.slice(index + 1, end);
+      inWord = quoted = true;
+      index = end;
+    } else if (char === '"') {
+      inWord = quoted = true;
+      for (index += 1; index < source.length && source[index] !== '"'; index += 1) {
+        if (source[index] === "\\" && /[$`"\\\n]/.test(source[index + 1] ?? "")) {
+          index += 1;
+          if (source[index] !== "\n") word += source[index];
+        } else if (opensExpansion(index)) index = expansion(index);
+        else word += source[index];
+      }
+    } else if (opensExpansion(index) || (next === "(" && (char === "<" || char === ">"))) {
+      index = expansion(index);
+    } else if (char === ">" || char === "<" || (char === "&" && next === ">")) {
+      if (textStart < 0) textStart = inWord ? wordStart : index;
+      // A bare fd number right before the operator (`2>`) belongs to it, not to the words.
+      if (inWord && !quoted && /^\d+$/.test(word)) {
+        word = "";
+        inWord = false;
       } else {
-        current += char;
+        endWord();
       }
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (current.length > 0) {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += char;
-  }
-
-  if (current.length > 0) words.push(current);
-  return words;
-}
-
-function extractTeeTargets(command: string, cwd: string, targets: string[]): void {
-  for (const match of command.matchAll(TEE_RE)) {
-    const words = splitShellWords(match[1] ?? "");
-    for (const word of words) {
-      if (word === "-a" || word.startsWith("--")) continue;
-      pushUniqueTarget(targets, normalizeShellTarget(word, cwd));
+      const operator = REDIRECTION_OPERATOR_RE.exec(source.slice(index))![0];
+      pending = REDIRECTION_OPERATORS[operator];
+      index += operator.length - 1;
+    } else if (char === "(" && next === "(" && !inWord) {
+      endCommand();
+      index = inertSpan(index + 1, "(", ")");
+    } else if (char === ")" && inSubstitution && subshellDirs.length === 0) {
+      break;
+    } else if (char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+      // The second `|` of `||`, or the `&` of `|&`, only ends an already empty command.
+      endCommand(char === "|" && next !== "|");
+      if (char === "(") subshellDirs.push(cwd);
+      if (char === ")" && subshellDirs.length > 0) cwd = subshellDirs.pop();
+    } else if (char === "\n") {
+      endCommand();
+      index = skipHeredocBodies(source, index + 1, heredocs.splice(0)) - 1;
+    } else if (char === " " || char === "\t") {
+      endWord();
+    } else if (char === "#" && !inWord) {
+      const newline = source.indexOf("\n", index);
+      index = (newline < 0 ? source.length : newline) - 1;
+    } else {
+      word += char;
+      inWord = true;
     }
   }
+  endCommand();
+  return { commands, end: index };
 }
 
-function extractSedInPlaceTargets(command: string, cwd: string, targets: string[]): void {
-  const words = splitShellWords(command);
+/** A simple command's words from its name on, past keywords and `NAME=value` prefixes. */
+export function commandWords(words: readonly string[]): readonly string[] {
+  const start = words.findIndex((word) => !COMMAND_PREFIX_KEYWORDS.has(word) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  return start < 0 ? [] : words.slice(start);
+}
+
+function extractSedInPlaceTargets(words: readonly string[], cwd: string | undefined, targets: string[]): void {
   if (words[0] !== "sed") return;
 
   const inPlaceIndex = words.findIndex((word) => word === "-i" || word.startsWith("-i"));
@@ -150,8 +335,7 @@ function nonOptionOperands(words: readonly string[]): string[] {
   return operands;
 }
 
-function extractPathCommandTargets(command: string, cwd: string, targets: string[]): void {
-  const words = splitShellWords(command);
+function extractPathCommandTargets(words: readonly string[], cwd: string | undefined, targets: string[]): void {
   const commandName = words[0];
   if (!commandName) return;
 
@@ -172,7 +356,7 @@ function extractPathCommandTargets(command: string, cwd: string, targets: string
   }
 
 
-  if (commandName === "rm") {
+  if (commandName === "rm" || commandName === "tee") {
     for (const operand of nonOptionOperands(words.slice(1))) {
       pushUniqueTarget(targets, normalizeShellTarget(operand, cwd));
     }
@@ -188,16 +372,13 @@ function extractPathCommandTargets(command: string, cwd: string, targets: string
 }
 
 export function extractShellFileMutationTargets(command: string, cwd = process.cwd()): string[] {
-  const normalized = normalizeCommandForContextHygiene(command);
-  if (/^(eval|source|\.)\b/.test(normalized)) return [];
-
   const targets: string[] = [];
-  for (const match of command.matchAll(REDIRECTION_RE)) {
-    pushUniqueTarget(targets, normalizeShellTarget(match[1] ?? match[2] ?? match[3] ?? "", cwd));
+  for (const simpleCommand of parseShellCommands(command, cwd).commands) {
+    for (const write of simpleCommand.writes) pushUniqueTarget(targets, normalizeShellTarget(write, simpleCommand.cwd));
+    const words = commandWords(simpleCommand.words);
+    extractSedInPlaceTargets(words, simpleCommand.cwd, targets);
+    extractPathCommandTargets(words, simpleCommand.cwd, targets);
   }
-  extractTeeTargets(command, cwd, targets);
-  extractSedInPlaceTargets(command, cwd, targets);
-  extractPathCommandTargets(command, cwd, targets);
   return targets;
 }
 

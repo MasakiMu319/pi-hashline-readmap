@@ -6,6 +6,8 @@ import {
   compactLog,
   compactGitOutput,
 } from "../src/rtk/git.js";
+import { gitLog, gitLogGraph, gitLogOneline, sha } from "./helpers/git-log-fixture.js";
+import type { Drop } from "../src/rtk/drops.js";
 
 describe("isGitCommand", () => {
   it("matches git diff", () => {
@@ -79,7 +81,7 @@ describe("compactDiff", () => {
     const resultLines = result.split("\n");
     // Should be dramatically smaller than the 200+ input lines
     expect(resultLines.length).toBeLessThan(30);
-    expect(result).toContain("more changes");
+    expect(result).toMatch(/^\.\.\. and \d+ more lines$/m);
   });
 
   it("returns output unchanged when under maxLines", () => {
@@ -95,6 +97,26 @@ describe("compactDiff", () => {
     const result = compactDiff(output, 100);
     expect(result).toContain("+new");
     expect(result).toContain("-old");
+  });
+
+  it("keeps a file's rename, mode and binary lines, dropping only index and the ---/+++ headers", () => {
+    const output = [
+      ...["diff --git a/old.ts b/new.ts", "similarity index 100%", "rename from old.ts", "rename to new.ts"],
+      ...["diff --git a/logo.png b/logo.png", "index 1111111..2222222 100644", "Binary files a/logo.png and b/logo.png differ"],
+    ].join("\n");
+    expect(compactDiff(output)).toBe(
+      ["", "📄 new.ts", "  similarity index 100%", "  rename from old.ts", "  rename to new.ts", "", "📄 logo.png", "  Binary files a/logo.png and b/logo.png differ"].join("\n"),
+    );
+  });
+
+  it("keeps a file header it can't read, such as git's quoted non-ASCII path", () => {
+    const header = 'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"';
+    expect(compactDiff([header, "@@ -1 +1 @@", "-a", "+b"].join("\n"))).toContain(`📄 ${header}`);
+  });
+  it("passes output with no file diff through, such as --stat", () => {
+    const stat = " src/a.ts | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
+    expect(compactDiff(stat)).toBe(stat);
+    expect(compactGitOutput(stat, "git diff --stat")).toBeNull();
   });
 });
 
@@ -124,7 +146,7 @@ describe("compactStatus", () => {
 
     const result = compactStatus(output);
     expect(result).toContain("Modified");
-    expect(result).toContain("src/changed.ts");
+    expect(result).toBe("📌 feature\n📝 Modified: 1 files\n  src/changed.ts");
   });
 
   it("shows untracked files", () => {
@@ -136,6 +158,39 @@ describe("compactStatus", () => {
     const result = compactStatus(output);
     expect(result).toContain("Untracked");
     expect(result).toContain("newfile.ts");
+  });
+
+  it("keeps the branch line's tracking and lists a conflict under Conflicts, not Staged", () => {
+    const output = ["## main...origin/main [ahead 1]", "DU a.ts", "M  b.ts", ""].join("\n");
+    expect(compactStatus(output)).toBe(
+      ["📌 main...origin/main [ahead 1]", "✅ Staged: 1 files", "  b.ts", "⚠️ Conflicts: 1 files", "  DU a.ts"].join("\n"),
+    );
+  });
+
+  // The unmerged pairs of git-status(1)'s short-format table.
+  it.each(["DD", "AU", "UD", "UA", "DU", "AA", "UU"])("lists %s only under Conflicts", (code) => {
+    expect(compactStatus(`## main\n${code} a.ts`)).toBe(`📌 main\n⚠️ Conflicts: 1 files\n  ${code} a.ts`);
+  });
+
+  it("never cuts the conflicts", () => {
+    const conflicts = Array.from({ length: 7 }, (_, i) => `UU c${i}.ts`);
+    const drops: Drop[] = [];
+    const result = compactStatus(["## main", ...conflicts].join("\n"), drops);
+    expect(result).toBe(["📌 main", "⚠️ Conflicts: 7 files", ...conflicts.map((line) => `  ${line}`)].join("\n"));
+    expect(drops).toEqual([]);
+  });
+
+  it("lists type changes and intent-to-add as changes, and ignored files under Ignored, cut at 3", () => {
+    const ignored = Array.from({ length: 5 }, (_, i) => `!! build/${i}.o`);
+    const drops: Drop[] = [];
+    const result = compactStatus(["## main", "T  link", " T tool", " A intent.ts", ...ignored].join("\n"), drops);
+    expect(result).toBe(
+      [
+        ...["📌 main", "✅ Staged: 1 files", "  link", "📝 Modified: 2 files", "  tool", "  intent.ts"],
+        ...["🚫 Ignored: 5 files", "  build/0.o", "  build/1.o", "  build/2.o", "  ... and 2 more files"],
+      ].join("\n"),
+    );
+    expect(drops).toEqual([{ count: 2, unit: "files" }]);
   });
 
   it("preserves unsupported long-form status output across working-tree states", () => {
@@ -192,41 +247,64 @@ describe("compactStatus", () => {
 });
 
 describe("compactLog", () => {
-  it("limits log entries to default 20", () => {
-    const lines: string[] = [];
-    for (let i = 0; i < 50; i++) {
-      lines.push(`abc${i}def commit message ${i}`);
-    }
-    const output = lines.join("\n");
-
-    const result = compactLog(output);
-    expect(result).toContain("and 30 more commits");
+  it("returns a log within 20 commits unchanged", () => {
+    for (const log of [gitLog(3), gitLog(20)]) expect(compactLog(log)).toBe(log);
   });
 
-  it("limits log entries to custom limit", () => {
-    const lines: string[] = [];
-    for (let i = 0; i < 20; i++) {
-      lines.push(`commit ${i}`);
-    }
-    const output = lines.join("\n");
-
-    const result = compactLog(output, 5);
-    expect(result).toContain("and 15 more commits");
+  it("keeps 20 whole commits, bodies uncut, and counts the dropped commits", () => {
+    const log = gitLog(30);
+    const kept = log.slice(0, log.indexOf(`commit ${sha(20)}`));
+    expect(compactLog(log)).toBe(`${kept}... and 10 more commits`);
   });
 
-  it("returns all entries when under limit", () => {
-    const output = "commit 1\ncommit 2\ncommit 3";
-    const result = compactLog(output, 10);
-    expect(result).not.toContain("more commits");
-    expect(result).toContain("commit 1");
-    expect(result).toContain("commit 3");
+  it("splits --graph output at its prefixed commit headers", () => {
+    const log = gitLogGraph(30);
+    const kept = log.slice(0, log.indexOf(`* commit ${sha(20)}`));
+    expect(compactLog(log)).toBe(`${kept}... and 10 more commits`);
   });
 
-  it("truncates long lines to 80 chars", () => {
-    const longLine = "a".repeat(100);
-    const result = compactLog(longLine);
-    expect(result.length).toBeLessThanOrEqual(80);
-    expect(result).toContain("...");
+  it("counts a merge and a side-branch commit in --graph output as headers", () => {
+    const log = [
+      `*   commit ${sha(1)}`,
+      "|\\  Merge: aaaaaaa bbbbbbb",
+      `| * commit ${sha(2)}`,
+      "|/  Author: A <a@example.test>",
+      `* commit ${sha(3)}`,
+      "  Author: A <a@example.test>",
+    ].join("\n");
+    expect(compactLog(log, 2)).toBe(`${log.split("\n").slice(0, 4).join("\n")}\n... and 1 more commits`);
+  });
+
+  // Header shapes measured from git 2.x: side marks without --graph, node markers and a blank first column with it.
+  it.each([
+    ["--left-right", ["commit < SHA", "commit > SHA"]],
+    ["--boundary", ["commit - SHA"]],
+    ["--cherry-mark", ["commit + SHA", "commit = SHA"]],
+    ["--graph --left-right", ["< commit SHA", "  > commit SHA"]],
+    ["--graph --boundary", ["o commit SHA", "o | commit SHA"]],
+    ["--graph with a blank first column", ["  * commit SHA", "|   * commit SHA"]],
+    ["--graph octopus merge", ["*---.   commit SHA"]],
+    ["--abbrev-commit --abbrev=4", ["commit 5bcd"]],
+  ])("counts %s headers", (_, shapes) => {
+    const headers = [`commit ${sha(0)}`, ...shapes.map((shape, i) => shape.replace("SHA", sha(i + 1)))];
+    const log = headers.map((header) => `${header}\nAuthor: A <a@example.test>`).join("\n");
+    expect(compactLog(log, 1)).toBe(`${headers[0]}\nAuthor: A <a@example.test>\n... and ${shapes.length} more commits`);
+  });
+
+  it("keeps 20 lines of headerless output and counts the dropped lines", () => {
+    const log = gitLogOneline(30);
+    const kept = log.split("\n").slice(0, 20).join("\n");
+    expect(compactLog(log)).toBe(`${kept}\n... and 10 more lines`);
+  });
+
+  it("does not count a trailing newline as a dropped line", () => {
+    const log = gitLogOneline(20);
+    expect(compactLog(log)).toBe(log);
+  });
+
+  it("honors a custom limit", () => {
+    expect(compactLog(gitLogOneline(20), 5)).toMatch(/\n\.\.\. and 15 more lines$/);
+    expect(compactLog(gitLog(20), 5)).toMatch(/\n\.\.\. and 15 more commits$/);
   });
 });
 

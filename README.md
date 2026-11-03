@@ -24,7 +24,7 @@ Requires Pi extension support and Node.js 22.19 or newer. Start a new Pi session
 
 ### Validated compatibility baseline
 
-Development, schema validation, and extension-load testing use the exact Pi version resolved by `package-lock.json`, currently Pi 0.84.2, with TypeBox 1.3.7. Pi provides `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` to loaded extensions, so those host-bundled packages intentionally retain `"*"` peer ranges; the development dependencies and lockfile record the versions validated by this repository.
+Development, schema validation, and extension-load testing use the exact Pi version resolved by `package-lock.json`, currently Pi 1.5.0, with TypeBox 1.3.27. Pi provides `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` to loaded extensions, so those host-bundled packages intentionally retain `"*"` peer ranges; the development dependencies and lockfile record the versions validated by this repository.
 
 Run the compatibility coverage through the normal test suite or by itself:
 
@@ -34,7 +34,7 @@ npm test -- tests/pi-extension-load-compatibility.test.ts tests/pi-host-null-pip
 npm run typecheck
 ```
 
-The suite exercises the real locked-host tool pipeline as well as extension loading. [Compatibility CI](https://github.com/coctostan/pi-hashline-readmap/actions/workflows/pi-compatibility.yml) independently provisions exactly Pi 1.2.0. Through that host's loader, wrapper, agent-core pipeline, and `ExtensionRunner`, it checks required-null rejection, `structuredContent` passthrough, and real codemode scripts. An npm 11/12 matrix verifies both array and keyed-object `npm pack --json` output. This runtime lane does not replace the locked development baseline or typecheck; see [AGENTS.md](https://github.com/coctostan/pi-hashline-readmap/blob/main/AGENTS.md) to reproduce it.
+The suite runs against one tested host, the locked Pi 1.5.0, and exercises its real tool pipeline as well as extension loading: through the host's loader, wrapper, agent-core pipeline, and `ExtensionRunner`, it checks required-null rejection, `structuredContent` passthrough, and real codemode scripts. [Compatibility CI](https://github.com/coctostan/pi-hashline-readmap/actions/workflows/pi-compatibility.yml) runs the suite and typecheck on that host, with an npm 11/12 matrix verifying both array and keyed-object `npm pack --json` output. To try a newer Pi, point `PI_COMPAT_HOST` at its install; see [AGENTS.md](https://github.com/coctostan/pi-hashline-readmap/blob/main/AGENTS.md).
 
 The extension and the exact Pi host version resolved by `package-lock.json` share one Node.js engine baseline, currently Node.js 22.19 or newer. The loader compatibility test verifies that this package's `engines.node` declaration stays identical to the installed locked Pi host package's declaration.
 
@@ -137,7 +137,7 @@ Most users need none. Global settings live at `~/.pi/agent/hashline-readmap/sett
 
 Results retain readable text and additive `details.ptcValue` records. See [structured output and codemode](docs/structured-output.md) and [integration surfaces](docs/integrations.md).
 
-Enable Pi 1.1 codemode additively with `pi --tools +codemode` or `"defaultTools": ["+codemode"]`, preserving your existing selection. Scripts receive Hashline structured values, including fresh LINE:HASH anchors and raw grep records. See [tested codemode recipes](docs/codemode-recipes.md) for compact projections, failure handling, image variants, search/edit chains, and small cross-call state; [codemode integration](docs/structured-output.md#codemode-integration) defines the result contracts. Codemode-only exposure remains opt-in and does not bypass permission guards.
+On Pi 1.1+, enable codemode additively with `pi --tools +codemode` or `"defaultTools": ["+codemode"]`, preserving your existing selection. Scripts receive Hashline structured values, including fresh LINE:HASH anchors and raw grep records. See [tested codemode recipes](docs/codemode-recipes.md) for compact projections, failure handling, image variants, search/edit chains, and small cross-call state; [codemode integration](docs/structured-output.md#codemode-integration) defines the result contracts. Codemode-only exposure remains opt-in and does not bypass permission guards.
 
 Required JSON `null` arguments are rejected before Pi can coerce them into strings or other scalars; optional nulls behave like omission, and the literal string `"null"` remains valid. Pi's preparation errors preserve the message and `isError`, but not custom structured error metadata. See [host-boundary null contracts](docs/structured-output.md#required-nulls-at-the-host-boundary).
 

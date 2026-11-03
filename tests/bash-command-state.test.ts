@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBashCommandState } from "../src/bash-command-state.js";
+import { buildBashCommandState, extractShellFileMutationTargets, parseShellCommands } from "../src/bash-command-state.js";
 
 describe("buildBashCommandState", () => {
   it("classifies git repo-state, history, and mutation commands", () => {
@@ -174,5 +174,107 @@ describe("buildBashCommandState", () => {
 
     expect(state.stateKind).toBe("debug");
     expect(state.fileTargets).toBeUndefined();
+  });
+});
+
+describe("extractShellFileMutationTargets across a command chain", () => {
+  const cwd = "/tmp/chain";
+  const cases: Array<[string, string, string[]]> = [
+    ["&& separator", "mkdir -p d && mv a b", ["a", "b"]],
+    ["|| separator", "npm test || rm -f x", ["x"]],
+    ["; separator", "echo hi; cp a b", ["b"]],
+    ["background &", "sleep 1 & rm x", ["x"]],
+    ["newline", "echo hi\ninstall -m 0644 a b", ["b"]],
+    ["pipe into tee", "npm test 2>&1 | tee log.txt", ["log.txt"]],
+    ["subshell and group", "(rm a) && { sed -i 's/x/y/' b; }", ["a", "b"]],
+    ["NAME=value prefix", "FOO=1 BAR=2 sed -i 's/a/b/' f", ["f"]],
+    ["if/then keywords", "if true; then sed -i 's/a/b/' f; fi", ["f"]],
+    ["loop keywords", "for x in a b; do rm out.txt; done", ["out.txt"]],
+    ["! and time", "! rm a && time cp b c", ["a", "c"]],
+    ["heredoc body excluded", "cat <<'EOF'\nprintf a > x\nEOF\nsed -i 's/a/b/' y", ["y"]],
+    ["<<- heredoc body excluded", "cat <<-EOF > out.txt\n\tprintf a > x\n\tEOF\nrm z", ["out.txt", "z"]],
+    ["here-string is not a heredoc", "grep x <<< \"$v\"\nrm f", ["f"]],
+    ["arithmetic shift is not a heredoc", "echo $((1 << 2))\nrm f", ["f"]],
+    ["arithmetic command shift is not a heredoc", "((n <<= 1))\nrm f", ["f"]],
+    ["arithmetic comparison is not a redirection", "echo $((a > b)) > out.txt; ((c > d))", ["out.txt"]],
+    ["quoted > is not a redirection", "echo \"a > b\" && git commit -m 'x > y'", []],
+    ["comment is not a redirection", "echo x > out.txt # > note.txt", ["out.txt"]],
+    ["fd redirections", "cmd > a.txt 2> b.txt &> c.txt 2>&1 >/dev/null", ["a.txt", "b.txt", "c.txt"]],
+    ["fd number is not an operand", "rm -f x 2>/dev/null", ["x"]],
+    ["quoted or escaped digits are operands", "rm '2'>out; rm \\3>/dev/null", ["out", "2", "3"]],
+    ["heredoc delimiter runs no substitution", "cat <<\"$(rm a)\"\nhello\n$(rm a)\nrm b", ["b"]],
+    ["command substitution", "v=$(sed -i 's/a/b/' f)", ["f"]],
+    ["substitutions in double quotes and backticks", "echo `rm a` \"$(rm b) `rm c`\"", ["a", "b", "c"]],
+    ["subshell inside a substitution", "echo \"$( (rm a); rm b )\"", ["a", "b"]],
+    ["comment inside a substitution", "echo \"$(printf x # (\n)\"; rm victim", ["victim"]],
+    ["heredoc inside a substitution", "echo $(cat <<'EOF'\n) ; rm victim\nEOF\n)", []],
+    ["substitution inside arithmetic", "echo $(( $(rm f; echo 0) + 1 ))", ["f"]],
+    ["parameter expansion text is not a heredoc", "echo ${v:-a<<EOF}\nrm victim", ["victim"]],
+    ["substitution inside a parameter expansion", "echo ${v:-$(rm a)} \"${w:-`rm b`}\"", ["a", "b"]],
+    ["line continuation inside double quotes", "printf x > \"fi\\\nle\"", ["file"]],
+    ["process substitution", "diff <(sort a) <(sort b) > out.txt", ["out.txt"]],
+    ["redirection of eval or source", "source env.sh > log.txt", ["log.txt"]],
+  ];
+
+  it.each(cases)("%s", (_name, command, expected) => {
+    expect(extractShellFileMutationTargets(command, cwd)).toEqual(expected.map((target) => `${cwd}/${target}`));
+  });
+});
+
+describe("extractShellFileMutationTargets follows cd", () => {
+  const cwd = "/tmp/cd";
+  const cases: Array<[string, string, string[]]> = [
+    ["relative cd", "cd sub && rm f", ["/tmp/cd/sub/f"]],
+    ["sed -i after cd", "cd d && sed -i 's/a/b/' f", ["/tmp/cd/d/f"]],
+    ["absolute cd", "cd /abs && rm f", ["/abs/f"]],
+    ["cd after cd, options and --", "cd -P sub && cd -- deeper && rm f", ["/tmp/cd/sub/deeper/f"]],
+    ["cd ..", "cd sub; cd ..; rm f", ["/tmp/cd/f"]],
+    ["quoted cd operand keeps its spaces", "cd ' my dir ' && rm f", ["/tmp/cd/ my dir /f"]],
+    ["cd behind a keyword", "if cd sub; then rm f; fi", ["/tmp/cd/sub/f"]],
+    ["subshell restores the directory", "(cd sub && make) && echo x > out.txt", ["/tmp/cd/out.txt"]],
+    ["cd inside a subshell", "(cd sub && rm f); rm g", ["/tmp/cd/sub/f", "/tmp/cd/g"]],
+    ["nested subshells", "(cd a; (cd b; rm f); rm g); rm h", ["/tmp/cd/a/b/f", "/tmp/cd/a/g", "/tmp/cd/h"]],
+    ["command substitution keeps its cd", "v=$(cd sub && rm a); rm b", ["/tmp/cd/sub/a", "/tmp/cd/b"]],
+    ["backticks keep their cd", "echo `cd sub; rm a`; rm b", ["/tmp/cd/sub/a", "/tmp/cd/b"]],
+    ["process substitution keeps its cd", "diff <(cd sub; rm a) b > c", ["/tmp/cd/sub/a", "/tmp/cd/c"]],
+    ["substitution runs where its command does", "cd sub && echo $(rm a) > b", ["/tmp/cd/sub/a", "/tmp/cd/sub/b"]],
+    ["cd's own redirection resolves before it moves", "cd sub > log.txt; rm f", ["/tmp/cd/log.txt", "/tmp/cd/sub/f"]],
+    ["bare cd keeps only absolute targets", "cd; rm f; rm /abs/g", ["/abs/g"]],
+    ["cd - keeps only absolute targets", "cd -; rm f", []],
+    ["cd with two operands keeps only absolute targets", "cd a b; rm f", []],
+    ["non-literal cd keeps only absolute targets", "cd \"$DIR\" && rm f && cp a /abs/b", ["/abs/b"]],
+    ["cd ~ keeps only absolute targets", "cd ~/x && rm f", []],
+    ["relative cd after an unknown one stays unknown", "cd $X; cd sub; rm f", []],
+    ["absolute cd after an unknown one", "cd $X; cd /abs; rm f", ["/abs/f"]],
+    ["subshell restores a known directory after an unknown cd", "(cd $X; rm f); rm g", ["/tmp/cd/g"]],
+  ];
+
+  it.each(cases)("%s", (_name, command, expected) => {
+    expect(extractShellFileMutationTargets(command, cwd)).toEqual(expected);
+  });
+});
+
+describe("parseShellCommands marks printing parts", () => {
+  // Each simple command as [text, inSubstitution, feedsPipe], in the order the parser returns them.
+  const cases: Array<[string, string, Array<[string, boolean, boolean]>]> = [
+    ["; separator", "git log -3; echo done", [["git log -3", false, false], ["echo done", false, false]]],
+    ["&& then a pipe", "cd sub && git diff | cat", [["cd sub", false, false], ["git diff", false, true], ["cat", false, false]]],
+    ["|| is not a pipe", "npm test || echo failed", [["npm test", false, false], ["echo failed", false, false]]],
+    ["|& is a pipe", "npm test |& tail -5", [["npm test", false, true], ["tail -5", false, false]]],
+    ["command substitution", "echo $(git log)", [["git log", true, false], ["echo $(git log)", false, false]]],
+    ["pipe inside a substitution", "v=$(git log | head -1)", [["git log", true, true], ["head -1", true, false], ["v=$(git log | head -1)", false, false]]],
+    ["backticks", "echo `git rev-parse HEAD`", [["git rev-parse HEAD", true, false], ["echo `git rev-parse HEAD`", false, false]]],
+    ["process substitution", "diff <(sort a) b", [["sort a", true, false], ["diff <(sort a) b", false, false]]],
+    ["subshell", "(cd x && git diff)", [["cd x", false, false], ["git diff", false, false]]],
+    ["heredoc", "cat <<'EOF' | wc -l\na | b; c\nEOF\ngit status", [["cat <<'EOF'", false, true], ["wc -l", false, false], ["git status", false, false]]],
+    ["redirections", "git diff 2>&1 > out.txt", [["git diff 2>&1 > out.txt", false, false]]],
+    ["redirection first", "2>/dev/null git status; >out.txt echo hi", [["2>/dev/null git status", false, false], [">out.txt echo hi", false, false]]],
+    ["quoted ; and |", "git commit -m 'a; b | c' && echo \"x|y\"", [["git commit -m 'a; b | c'", false, false], ["echo \"x|y\"", false, false]]],
+    ["comment and line continuation", "git log \\\n  --oneline # note | x\necho y", [["git log \\\n  --oneline", false, false], ["echo y", false, false]]],
+  ];
+
+  it.each(cases)("%s", (_name, command, expected) => {
+    const parts = parseShellCommands(command, "/tmp").commands.map((part) => [part.text, part.inSubstitution, part.feedsPipe]);
+    expect(parts).toEqual(expected);
   });
 });

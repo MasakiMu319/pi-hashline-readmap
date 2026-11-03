@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import * as git from "../src/rtk/git.js";
@@ -67,6 +68,21 @@ describe("details.rtkCompaction — main RTK path (single technique)", () => {
     expect(result.details.rtkCompaction.truncated).toBe(false);
     expect(result.details.ptcValue?.rtkCompaction).toEqual(result.details.rtkCompaction);
   });
+
+  it("reports applied=false when only the anti-pattern hint was added", async () => {
+    const handler = await loadHandler("hint-only");
+    const result = await handler(makeBashEvent("t-hint", "find src -name '*.ts'", "src/a.ts\nsrc/b.ts\n"));
+    expect(result.content[0].text).toContain("[Hint: ");
+    expect(result.details.rtkCompaction).toEqual({
+      applied: false,
+      techniques: [],
+      truncated: false,
+      dropped: [],
+      originalLineCount: 3,
+      compactedLineCount: 5, // the hint's lines included
+    });
+    expect(result.details.ptcValue?.rtkCompaction).toEqual(result.details.rtkCompaction);
+  });
 });
 
 
@@ -80,6 +96,7 @@ describe("details.rtkCompaction — PI_RTK_BYPASS path", () => {
       applied: false,
       techniques: [],
       truncated: false,
+      dropped: [],
       originalLineCount: expect.any(Number),
       compactedLineCount: expect.any(Number),
     });
@@ -124,31 +141,67 @@ describe("details.rtkCompaction — test-output short-circuit", () => {
 });
 
 
-describe("details.rtkCompaction — truncated end-to-end", () => {
-  it("sets truncated=true when the route emits the '... N lines omitted ...' marker", async () => {
-    const truncatedRouteOutput = [
-      "M file1.ts",
-      "M file2.ts",
-      "",
-      "... 12 lines omitted ...",
-      "",
-      "M file19.ts",
-      "M file20.ts",
-    ].join("\n") + "\n";
-    const gitSpy = vi.spyOn(git, "compactGitOutput").mockReturnValue(truncatedRouteOutput);
-    const handler = await loadHandler("truncated");
+describe("details.rtkCompaction — dropped end-to-end", () => {
+  it("reports the route's drops as dropped and sets truncated, mirrored at ptcValue", async () => {
+    const handler = await loadHandler("dropped");
+    // The dropped 21st line reads like the marker that replaces it.
+    const lines = Array.from({ length: 20 }, (_, i) => `abc${String(i).padStart(4, "0")} subject ${i}`);
+    const rawInput = [...lines, "... and 1 more lines"].join("\n") + "\n";
+    const result = await handler(makeBashEvent("t-dropped", "git log --oneline", rawInput));
+    expect(result.details.rtkCompaction).toMatchObject({
+      applied: true,
+      techniques: ["git"],
+      truncated: true,
+      dropped: [{ count: 1, unit: "lines" }],
+    });
+    expect(result.details.ptcValue?.rtkCompaction).toEqual(result.details.rtkCompaction);
+  });
+});
+
+describe("RTK notice — Original output names the saved pre-RTK copy", () => {
+  it("names a 0600 file holding the pre-RTK output byte for byte, and no Full output:", async () => {
+    const handler = await loadHandler("original-output");
+    const lines = Array.from({ length: 21 }, (_, i) => `abc${String(i).padStart(4, "0")} subjéct ${i}`);
+    const rawInput = lines.join("\n") + "\n";
+    const result = await handler(makeBashEvent("t-original", "git log --oneline", rawInput));
+    const text: string = result.content[0].text;
+    const match = text.match(
+      /^\[RTK: compressed git output .* \(-?\d+% saved\)\. Original output: (\S+)\. Use `PI_RTK_BYPASS=1 git log --oneline` to re-run uncompressed\.\]\n/,
+    );
+    expect(match, text).not.toBeNull();
+    const path = match![1];
     try {
-      const rawInput = Array.from({ length: 25 }, (_, i) => `M file${i + 1}.ts`).join("\n") + "\n";
-      const result = await handler(makeBashEvent("t-trunc", "git status", rawInput));
-      expect(result.details.rtkCompaction.applied).toBe(true);
-      expect(result.details.rtkCompaction.techniques).toEqual(["git"]);
-      expect(result.details.rtkCompaction.truncated).toBe(true);
-      expect(result.details.rtkCompaction.originalLineCount).toBeGreaterThan(
-        result.details.rtkCompaction.compactedLineCount,
-      );
-      expect(result.details.ptcValue?.rtkCompaction).toEqual(result.details.rtkCompaction);
+      expect(readFileSync(path)).toEqual(Buffer.from(rawInput, "utf8"));
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(text).not.toContain("Full output:");
+      expect(result.details.bashOriginalOutput).toMatchObject({ originalPath: path, snapshotWritten: true });
     } finally {
-      gitSpy.mockRestore();
+      rmSync(path, { force: true });
     }
+  });
+
+  it("leaves the output uncompacted when its original cannot be saved", async () => {
+    const handler = await loadHandler("original-fail");
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = "/nonexistent-hashline-tmpdir";
+    try {
+      const lines = Array.from({ length: 21 }, (_, i) => `abc${String(i).padStart(4, "0")} subject ${i}`);
+      const rawInput = lines.join("\n");
+      const result = await handler(makeBashEvent("t-original-fail", "git log --oneline", rawInput));
+      expect(result.content[0].text).toBe(rawInput);
+      expect(result.details.rtkCompaction).toMatchObject({ applied: false, dropped: [] });
+      expect(result.details.compressionInfo.bypassedBy).toBe("unsaved-original");
+      expect(result.details.bashOriginalOutput.snapshotWriteError).toContain("ENOENT");
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+  });
+
+  it("saves nothing for an uncompacted result", async () => {
+    const handler = await loadHandler("original-none");
+    const result = await handler(makeBashEvent("t-original-none", "echo hello", "hello\n"));
+    expect(result.content[0].text).toBe("hello\n");
+    expect(result.details.bashOriginalOutput?.originalPath).toBeUndefined();
   });
 });
